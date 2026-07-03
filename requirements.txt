@@ -1,0 +1,6 @@
+numpy
+opencv-python
+pyyaml
+matplotlib
+pytest
+openpi-client @ git+https://github.com/Physical-Intelligence/openpi.git#subdirectory=packages/openpi-client
