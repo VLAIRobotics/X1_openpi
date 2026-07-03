@@ -1,0 +1,18 @@
+# 每个任务一个条目。right0 为 8 维 home 位（7 关节 + 夹爪，弧度）。
+# 可选字段：
+#   action_filter_alpha: 0.5        # EMA，(0,1]，1.0=不滤波，越小越平滑
+#   action_filter_type: moving_average  # 配合 action_filter_window 使用
+#   action_filter_window: 5
+#   chunk_transition_steps: 10      # chunk 边界线性过渡步数，0=禁用
+#   action_postprocess:             # 夹爪后处理规则（作用于 action[7]）
+#     gripper:
+#       - when: below / above
+#         threshold: -0.5
+#         set: -1.0                 # 或 add: 0.1
+
+example_task:
+  language_instruction: "pick up the object"
+  right0: [-0.1413366903181501, 0.14400701915007197, -0.2534905012588702,
+           0.8703364614328226, 0.012397955291065799, 0.12722209506370596,
+           0.9061951628900591, 0.0]
+  chunk_transition_steps: 10
