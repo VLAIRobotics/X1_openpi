@@ -30,11 +30,35 @@ def _on_sigint(signum, frame):
     shutdown_event.set()
 
 
-def get_observation(operator, cameras):
-    images = cameras.get_images()
+def get_observation(operator, cameras, verbose=True):
+    try:
+        images = cameras.get_images(verbose=verbose)
+    except TypeError:
+        images = cameras.get_images()
     if images is None:
         return None
     return {"images": images, "state": operator.read_state()}
+
+
+def wait_for_observation(operator, cameras, timeout_s: float):
+    deadline = time.monotonic() + timeout_s
+    next_report = 0.0
+
+    while not shutdown_event.is_set():
+        observation = get_observation(operator, cameras, verbose=False)
+        if observation is not None:
+            print("Camera frames ready")
+            return observation
+
+        now = time.monotonic()
+        if now >= deadline:
+            return None
+        if now >= next_report:
+            print(f"Waiting for camera frames... ({deadline - now:.1f}s left)")
+            next_report = now + 1.0
+        time.sleep(0.1)
+
+    return None
 
 
 def inference_fn(policy, operator, cameras, config):
@@ -91,6 +115,13 @@ def model_inference(args, config, operator, cameras, policy=None):
         print("Warmup the server...")
         policy.warmup()
         print("Server warmed up")
+
+        if not args.dry_run and args.camera_wait_s > 0:
+            observation = wait_for_observation(operator, cameras, args.camera_wait_s)
+            if observation is None:
+                raise RuntimeError(
+                    "Camera frames unavailable; check ROS2 camera topics before moving home"
+                )
 
         if not args.auto_start:
             input("Press enter to move home and start")
@@ -195,12 +226,18 @@ def build_arg_parser():
     parser.add_argument("--save_dir", type=str, default="", help="Directory for --plot_filter outputs")
     parser.add_argument("--dry_run", action="store_true", default=False, help="Mock hardware and cameras")
     parser.add_argument(
+        "--camera_wait_s",
+        type=float,
+        default=15.0,
+        help="Wait this many seconds for all camera frames before moving home",
+    )
+    parser.add_argument(
         "--cam_high_topic", type=str, default="/cam_chest/cam_chest/color/image_raw"
     )
     parser.add_argument(
         "--cam_right_wrist_topic",
         type=str,
-        default="/cam_wrist_right/cam_wrist_right/color/image_rect_raw",
+        default="/cam_wrist_right/cam_wrist_right/color/image_raw",
     )
     return parser
 

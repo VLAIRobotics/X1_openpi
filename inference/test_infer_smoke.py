@@ -41,6 +41,7 @@ def _args():
         plot_filter=False,
         save_dir="",
         dry_run=True,
+        camera_wait_s=15.0,
     )
 
 
@@ -87,6 +88,32 @@ def test_model_inference_does_not_move_home_when_warmup_fails():
 
     with pytest.raises(RuntimeError, match="server unavailable"):
         model_inference(args, config, operator, FakeCameraStreamer(), policy=WarmupFailPolicy())
+
+    assert operator.go_home_calls == []
+
+
+def test_model_inference_does_not_move_home_when_camera_missing():
+    from utils import get_config
+
+    class FakeOperator:
+        def __init__(self):
+            self.go_home_calls = []
+
+        def go_home(self, target=None):
+            self.go_home_calls.append(target)
+
+    class MissingCamera:
+        def get_images(self, max_age_s=0.5, verbose=True):
+            return None
+
+    args = _args()
+    args.dry_run = False
+    args.camera_wait_s = 0.01
+    config = get_config(args)
+    operator = FakeOperator()
+
+    with pytest.raises(RuntimeError, match="Camera frames unavailable"):
+        model_inference(args, config, operator, MissingCamera(), policy=FakePolicy(args.chunk_size))
 
     assert operator.go_home_calls == []
 

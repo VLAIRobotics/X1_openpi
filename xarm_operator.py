@@ -29,7 +29,7 @@ HOME_POSITION = np.array([
 
 CAMERA_TOPICS = {
     "cam_high": "/cam_chest/cam_chest/color/image_raw",
-    "cam_right_wrist": "/cam_wrist_right/cam_wrist_right/color/image_rect_raw",
+    "cam_right_wrist": "/cam_wrist_right/cam_wrist_right/color/image_raw",
 }
 
 
@@ -183,29 +183,39 @@ class CameraStreamer:
         )
         self._thread.start()
 
-    def get_images(self, max_age_s: float = 0.5):
+    def get_images(self, max_age_s: float = 0.5, verbose: bool = True):
         """Return the latest frames, or None if any camera is missing/stale."""
         now = time.monotonic()
         with self._lock:
             for name in self._names:
                 if name not in self._frames:
-                    print(f"Camera {name} has no frame yet")
+                    if verbose:
+                        print(f"Camera {name} has no frame yet")
                     return None
                 if now - self._stamps[name] > max_age_s:
-                    print(f"Camera {name} frame is stale ({now - self._stamps[name]:.2f}s)")
+                    if verbose:
+                        print(f"Camera {name} frame is stale ({now - self._stamps[name]:.2f}s)")
                     return None
             return {name: self._frames[name].copy() for name in self._names}
 
     def stop(self):
-        self._node.destroy_node()
+        if getattr(self, "_stopped", False):
+            return
+        self._stopped = True
         if self._rclpy.ok():
             self._rclpy.shutdown()
+        if self._thread.is_alive():
+            self._thread.join(timeout=2.0)
+        try:
+            self._node.destroy_node()
+        except Exception:
+            pass
 
 
 class FakeCameraStreamer:
     """Dry-run camera source returning random images."""
 
-    def get_images(self, max_age_s: float = 0.5):
+    def get_images(self, max_age_s: float = 0.5, verbose: bool = True):
         return {
             name: np.random.randint(256, size=(480, 640, 3), dtype=np.uint8)
             for name in CAMERA_TOPICS
