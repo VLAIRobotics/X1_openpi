@@ -4,6 +4,7 @@ import sys
 import os
 
 import numpy as np
+import pytest
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -64,3 +65,54 @@ def test_smoke_dry_run(monkeypatch):
     state = operator.read_state()
     assert state.shape == (8,)
     assert np.all(state[:7] >= -1.5) and np.all(state[:7] <= 3.4)
+
+
+def test_model_inference_does_not_move_home_when_warmup_fails():
+    from utils import get_config
+
+    class WarmupFailPolicy:
+        def warmup(self):
+            raise RuntimeError("server unavailable")
+
+    class FakeOperator:
+        def __init__(self):
+            self.go_home_calls = []
+
+        def go_home(self, target=None):
+            self.go_home_calls.append(target)
+
+    args = _args()
+    config = get_config(args)
+    operator = FakeOperator()
+
+    with pytest.raises(RuntimeError, match="server unavailable"):
+        model_inference(args, config, operator, FakeCameraStreamer(), policy=WarmupFailPolicy())
+
+    assert operator.go_home_calls == []
+
+
+def test_main_shutdowns_operator_if_camera_init_fails(monkeypatch):
+    import infer_sync
+
+    shutdown_calls = []
+
+    class FakeOperator:
+        def __init__(self, can_interface, dry_run):
+            self.can_interface = can_interface
+            self.dry_run = dry_run
+
+        def shutdown(self):
+            shutdown_calls.append((self.can_interface, self.dry_run))
+
+    class FailingCamera:
+        def __init__(self, topic_map):
+            raise RuntimeError("camera init failed")
+
+    monkeypatch.setattr(sys, "argv", ["infer_sync.py", "--task", "example_task"])
+    monkeypatch.setattr(infer_sync, "XarmOperator", FakeOperator)
+    monkeypatch.setattr(infer_sync, "CameraStreamer", FailingCamera)
+
+    with pytest.raises(RuntimeError, match="camera init failed"):
+        infer_sync.main()
+
+    assert shutdown_calls == [("can1", False)]

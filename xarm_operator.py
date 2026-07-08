@@ -12,8 +12,8 @@ import numpy as np
 # 关节限位 (rad)，来自 x_air URDF
 JOINT_LIMITS_LOWER = np.array([-1.3, -0.1, -1.5, 0.0, -1.5, -0.7, -1.5])
 JOINT_LIMITS_UPPER = np.array([3.4, 1.7, 1.5, 2.4, 1.5, 0.7, 1.5])
-# 夹爪限位 (rad)：-1.0 全开，0.0 闭合
-GRIPPER_LOWER, GRIPPER_UPPER = -1.0, 0.0
+# 夹爪限位 (rad)：-1.1 全开，0.0 闭合；与 LeRobot 数据集最后一维对齐
+GRIPPER_LOWER, GRIPPER_UPPER = -1.1, 0.0
 
 # MIT 控制增益（x_air xarm_deploy_direct.py 现值）
 DEFAULT_KP = [240.0, 240.0, 240.0, 240.0, 24.0, 31.0, 25.0]

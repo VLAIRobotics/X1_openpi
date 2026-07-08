@@ -21,7 +21,7 @@ def test_clip_action_bounds():
 def test_clip_action_gripper_lower():
     action = np.zeros(8)
     action[7] = -2.0
-    assert clip_action(action)[7] == -1.0
+    assert clip_action(action)[7] == -1.1
 
 
 def test_dry_run_send_then_read_roundtrip():

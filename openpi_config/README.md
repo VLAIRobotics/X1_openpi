@@ -3,7 +3,8 @@
 本目录文件用于官方 openpi 仓库（https://github.com/Physical-Intelligence/openpi）。
 数据集为 x_air `lerobot_collector` 采集的 LeRobot 数据集，字段：
 `observation.images.cam_chest`、`observation.images.cam_wrist_right`、
-`observation.state` (8,)、`action` (8,)。
+`observation.state` (8,)、`action` (8,)、`task_index`。
+其中 state/action 最后一维为夹爪位置，当前数据约为 -1.1（全开）~ 0.0（闭合）。
 
 ## 1. 安装 transforms
 
@@ -76,7 +77,9 @@ TrainConfig(
 ```
 
 注意：
-- `prompt_from_task=True` 要求数据集每个 episode 有 task 字符串；若采集时没写，
+- `prompt_from_task=True` 会用数据中的 `task_index` 从 LeRobot `meta/tasks`
+  取任务字符串并注入为 `prompt`，所以逐帧数据里没有 `prompt` 字段是正常的。
+  若 `meta/tasks` 没有正确任务文本，
   改用 `base_config=DataConfig(default_prompt="<你的任务指令>")`（与
   `task_configs.yaml` 中 `language_instruction` 保持一致）。
 - 字段名以你的 openpi 版本为准，若 `DataConfigFactory`/`ModelTransformFactory`

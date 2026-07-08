@@ -8,10 +8,17 @@
 #     gripper:
 #       - when: below / above
 #         threshold: -0.5
-#         set: -1.0                 # 或 add: 0.1
+#         set: -1.1                 # 或 add: 0.1
 
 example_task:
   language_instruction: "pick up the object"
+  right0: [-0.1413366903181501, 0.14400701915007197, -0.2534905012588702,
+           0.8703364614328226, 0.012397955291065799, 0.12722209506370596,
+           0.9061951628900591, 0.0]
+  chunk_transition_steps: 10
+
+x1_stack_green_cube:
+  language_instruction: "stack_green_cube0625"
   right0: [-0.1413366903181501, 0.14400701915007197, -0.2534905012588702,
            0.8703364614328226, 0.012397955291065799, 0.12722209506370596,
            0.9061951628900591, 0.0]

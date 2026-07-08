@@ -77,15 +77,6 @@ def model_inference(args, config, operator, cameras, policy=None):
     chunk_size = config["chunk_size"]
     right0 = np.asarray(config["right0"])
 
-    operator.go_home(right0)
-    print("Warmup the server...")
-    policy.warmup()
-    print("Server warmed up")
-
-    if not args.auto_start:
-        input("Press enter to continue")
-    task_time = time.time()
-
     if config["action_filter_type"] == "moving_average":
         action_filter = MovingAverageFilter(config["action_filter_window"])
     else:
@@ -94,8 +85,19 @@ def model_inference(args, config, operator, cameras, policy=None):
     sub_steps = max(1, round(args.mit_rate / args.publish_rate))
     step_period = 1.0 / args.publish_rate
     episodes_done = 0
+    moved_home = False
 
     try:
+        print("Warmup the server...")
+        policy.warmup()
+        print("Server warmed up")
+
+        if not args.auto_start:
+            input("Press enter to move home and start")
+        operator.go_home(right0)
+        moved_home = True
+        task_time = time.time()
+
         while not shutdown_event.is_set():
             t = 0
             action_filter.reset()
@@ -173,7 +175,8 @@ def model_inference(args, config, operator, cameras, policy=None):
             if shutdown_event.is_set():
                 return
     finally:
-        operator.go_home(right0)
+        if moved_home:
+            operator.go_home(right0)
 
 
 def build_arg_parser():
@@ -203,35 +206,41 @@ def build_arg_parser():
 
 
 def main():
-    args = build_arg_parser().parse_args()
-    config = get_config(args)
-
-    signal.signal(signal.SIGINT, _on_sigint)
-
-    operator = XarmOperator(can_interface=args.can_interface, dry_run=args.dry_run)
-    if args.dry_run:
-        cameras = FakeCameraStreamer()
-    else:
-        cameras = CameraStreamer(
-            {"cam_high": args.cam_high_topic, "cam_right_wrist": args.cam_right_wrist_topic}
-        )
-
-    import termios
-    import tty
-
+    operator = None
+    cameras = None
     old_settings = None
-    if sys.stdin.isatty():
-        old_settings = termios.tcgetattr(sys.stdin)
-        tty.setcbreak(sys.stdin.fileno())
+
     try:
+        args = build_arg_parser().parse_args()
+        config = get_config(args)
+
+        signal.signal(signal.SIGINT, _on_sigint)
+
+        operator = XarmOperator(can_interface=args.can_interface, dry_run=args.dry_run)
+        if args.dry_run:
+            cameras = FakeCameraStreamer()
+        else:
+            cameras = CameraStreamer(
+                {"cam_high": args.cam_high_topic, "cam_right_wrist": args.cam_right_wrist_topic}
+            )
+
+        import termios
+        import tty
+
+        if sys.stdin.isatty():
+            old_settings = termios.tcgetattr(sys.stdin)
+            tty.setcbreak(sys.stdin.fileno())
+
         model_inference(args, config, operator, cameras)
     except KeyboardInterrupt:
         pass
     finally:
         if old_settings is not None:
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
-        operator.shutdown()
-        cameras.stop()
+        if operator is not None:
+            operator.shutdown()
+        if cameras is not None:
+            cameras.stop()
 
 
 if __name__ == "__main__":

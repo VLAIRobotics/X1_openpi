@@ -40,6 +40,10 @@ class OpenpiClient:
     def predict_action(self, payload: dict) -> np.ndarray:
         response = self.client.infer(build_observation(payload))
         actions = np.asarray(response["actions"])
+        if actions.ndim != 2 or actions.shape[1] < STATE_DIM:
+            raise ValueError(
+                f"Expected actions with shape (chunk, >= {STATE_DIM}), got {actions.shape}"
+            )
         return actions[:, :STATE_DIM]
 
     def warmup(self) -> None:

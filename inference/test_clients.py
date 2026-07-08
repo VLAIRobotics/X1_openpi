@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from clients import STATE_DIM, build_observation, OpenpiClient
 
@@ -41,6 +42,19 @@ def test_predict_action_truncates_to_state_dim():
     actions = client.predict_action(_payload())
 
     assert actions.shape == (50, STATE_DIM)
+
+
+class _BadWsClient:
+    def infer(self, obs):
+        return {"actions": np.ones((50, 7), dtype=np.float32)}
+
+
+def test_predict_action_rejects_too_few_action_dims():
+    client = OpenpiClient.__new__(OpenpiClient)
+    client.client = _BadWsClient()
+
+    with pytest.raises(ValueError, match="Expected actions"):
+        client.predict_action(_payload())
 
 
 def test_warmup_sends_valid_observation():
