@@ -161,7 +161,7 @@ class CameraStreamer:
         topic_map = topic_map or CAMERA_TOPICS
         if not rclpy.ok():
             rclpy.init()
-        self._node = rclpy.create_node("xarm_aio_cameras")
+        self._node = rclpy.create_node("x1_openpi_cameras")
         self._lock = threading.Lock()
         self._frames = {}
         self._stamps = {}
