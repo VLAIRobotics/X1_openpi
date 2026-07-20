@@ -197,8 +197,8 @@ checkpoint 输出路径为 `~/X1_openpi/openpi/checkpoints/pi05_x1_stack_green_c
 ```bash
 cd ~/X1_openpi/openpi
 uv run scripts/serve_policy.py --port 8000 policy:checkpoint \
-  --policy.config=pi05_x1_stack_green_cube \
-  --policy.dir=checkpoints/pi05_x1_stack_green_cube/xarm_right_v1/<STEP>
+  --policy.config=pi05_x1_fold_towel \
+  --policy.dir=checkpoints/pi05_x1_fold_towel/pi05_x1_fold_towel_0717/5000
 ```
 
 服务加载完成后监听 `0.0.0.0:8000`。
@@ -237,7 +237,7 @@ cd ~/X1_openpi
 conda activate X1_openpi
 
 python inference/infer_sync.py \
-  --task x1_stack_green_cube \
+  --task pi05_x1_fold_towel \
   --dry_run \
   --host <GPU_IP> \
   --port 8000 \
@@ -258,7 +258,7 @@ conda activate X1_openpi
 source /opt/ros/humble/setup.bash
 
 python inference/infer_sync.py \
-  --task x1_stack_green_cube \
+  --task pi05_x1_fold_towel \
   --host <GPU_IP> \
   --port 8000 \
   --max_episodes 10 \

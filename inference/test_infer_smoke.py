@@ -124,7 +124,7 @@ def test_main_shutdowns_operator_if_camera_init_fails(monkeypatch):
     shutdown_calls = []
 
     class FakeOperator:
-        def __init__(self, can_interface, dry_run):
+        def __init__(self, can_interface, dry_run, home_position=None):
             self.can_interface = can_interface
             self.dry_run = dry_run
 

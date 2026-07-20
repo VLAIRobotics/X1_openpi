@@ -1,5 +1,8 @@
-# 每个任务一个条目。right0 为 8 维 home 位（7 关节 + 夹爪，弧度）。
+# 每个任务一个条目。
+# 单臂任务：robot_mode: single，right0 为 8 维 home 位（7 关节 + 夹爪，弧度）。
+# 双臂任务：robot_mode: dual，left0/right0 各 8 维，state/action 顺序为 left0 后接 right0。
 # 可选字段：
+#   image_keys: ["cam_high", "cam_left_wrist", "cam_right_wrist"]
 #   action_filter_alpha: 0.5        # EMA，(0,1]，1.0=不滤波，越小越平滑
 #   action_filter_type: moving_average  # 配合 action_filter_window 使用
 #   action_filter_window: 5
@@ -11,6 +14,7 @@
 #         set: -1.1                 # 或 add: 0.1
 
 example_task:
+  robot_mode: single
   language_instruction: "pick up the object"
   right0: [-0.1413366903181501, 0.14400701915007197, -0.2534905012588702,
            0.8703364614328226, 0.012397955291065799, 0.12722209506370596,
@@ -18,7 +22,20 @@ example_task:
   chunk_transition_steps: 10
 
 x1_stack_green_cube:
+  robot_mode: single
   language_instruction: "stack_green_cube"
+  right0: [-0.14133669435977936, 0.444007009267807, -0.05349050089716911,
+           1.600000023841858, 0.012397955171763897, 0.12722209095954895,
+           0.0061951628886163235, -1.100000023841858]
+  chunk_transition_steps: 10
+
+pi05_x1_fold_towel:
+  robot_mode: dual
+  language_instruction: "Fold the towel twice"
+  image_keys: ["cam_high", "cam_left_wrist", "cam_right_wrist"]
+  left0: [-0.14133669435977936, 0.444007009267807, -0.05349050089716911,
+          1.600000023841858, 0.012397955171763897, 0.12722209095954895,
+          0.0061951628886163235, -1.100000023841858]
   right0: [-0.14133669435977936, 0.444007009267807, -0.05349050089716911,
            1.600000023841858, 0.012397955171763897, 0.12722209095954895,
            0.0061951628886163235, -1.100000023841858]

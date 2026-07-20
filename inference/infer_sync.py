@@ -21,7 +21,7 @@ from action_filter import (
 )
 from clients import OpenpiClient
 from utils import check_keyboard_input, get_config, handle_interactive_mode, process_action
-from xarm_operator import CameraStreamer, FakeCameraStreamer, XarmOperator
+from xarm_operator import CameraStreamer, DualXarmOperator, FakeCameraStreamer, XarmOperator
 
 shutdown_event = threading.Event()
 
@@ -67,11 +67,11 @@ def inference_fn(policy, operator, cameras, config):
         return None
 
     payload = {
-        "cam_high": observation["images"]["cam_high"],
-        "cam_right_wrist": observation["images"]["cam_right_wrist"],
         "state": observation["state"],
         "instruction": config["language_instruction"],
     }
+    for name in config["image_keys"]:
+        payload[name] = observation["images"][name]
     start_time = time.perf_counter()
     actions = policy.predict_action(payload)
     print(f"Model inference time: {(time.perf_counter() - start_time) * 1000:.1f} ms")
@@ -96,10 +96,15 @@ def maybe_save_filter_plot(args, config, raw_hist, filt_hist):
 
 def model_inference(args, config, operator, cameras, policy=None):
     if policy is None:
-        policy = OpenpiClient(host=args.host, port=args.port)
+        policy = OpenpiClient(
+            host=args.host,
+            port=args.port,
+            state_dim=config["state_dim"],
+            image_keys=config["image_keys"],
+        )
 
     chunk_size = config["chunk_size"]
-    right0 = np.asarray(config["right0"])
+    home = np.asarray(config["home"])
 
     if config["action_filter_type"] == "moving_average":
         action_filter = MovingAverageFilter(config["action_filter_window"])
@@ -125,7 +130,7 @@ def model_inference(args, config, operator, cameras, policy=None):
 
         if not args.auto_start:
             input("Press enter to move home and start")
-        operator.go_home(right0)
+        operator.go_home(home)
         moved_home = True
         task_time = time.time()
 
@@ -147,7 +152,7 @@ def model_inference(args, config, operator, cameras, policy=None):
                     if result == "reset":
                         maybe_save_filter_plot(args, config, raw_hist, filt_hist)
                         episode_closed = True
-                        operator.go_home(right0)
+                        operator.go_home(home)
                         if not args.auto_start:
                             input("Press enter to continue")
                         task_time = time.time()
@@ -207,7 +212,7 @@ def model_inference(args, config, operator, cameras, policy=None):
                 return
     finally:
         if moved_home:
-            operator.go_home(right0)
+            operator.go_home(home)
 
 
 def build_arg_parser():
@@ -220,6 +225,13 @@ def build_arg_parser():
     parser.add_argument("--publish_rate", type=int, default=30, help="Action step rate (Hz)")
     parser.add_argument("--mit_rate", type=int, default=500, help="MIT command rate (Hz)")
     parser.add_argument("--can_interface", type=str, default="can1", help="CAN interface name")
+    parser.add_argument("--left_can_interface", type=str, default="can0", help="Left arm CAN interface")
+    parser.add_argument(
+        "--right_can_interface",
+        type=str,
+        default=None,
+        help="Right arm CAN interface; defaults to --can_interface",
+    )
     parser.add_argument("--max_episodes", type=int, default=0, help="Stop after N episodes (0 = infinite)")
     parser.add_argument("--auto_start", action="store_true", default=False, help="Skip enter-to-continue prompts")
     parser.add_argument("--plot_filter", action="store_true", default=False, help="Save raw-vs-filtered plot per episode")
@@ -239,7 +251,27 @@ def build_arg_parser():
         type=str,
         default="/cam_wrist_right/cam_wrist_right/color/image_raw",
     )
+    parser.add_argument(
+        "--cam_left_wrist_topic",
+        type=str,
+        default="/cam_wrist_left/cam_wrist_left/color/image_raw",
+    )
+    parser.add_argument("--cam_low_topic", type=str, default="", help="Optional low/base camera topic")
     return parser
+
+
+def _topic_map_from_args(args, image_keys):
+    topics = {
+        "cam_high": args.cam_high_topic,
+        "cam_left_wrist": args.cam_left_wrist_topic,
+        "cam_right_wrist": args.cam_right_wrist_topic,
+    }
+    if args.cam_low_topic:
+        topics["cam_low"] = args.cam_low_topic
+    missing = [name for name in image_keys if name not in topics]
+    if missing:
+        raise ValueError(f"No ROS topic argument is configured for image keys: {missing}")
+    return {name: topics[name] for name in image_keys}
 
 
 def main():
@@ -253,13 +285,25 @@ def main():
 
         signal.signal(signal.SIGINT, _on_sigint)
 
-        operator = XarmOperator(can_interface=args.can_interface, dry_run=args.dry_run)
-        if args.dry_run:
-            cameras = FakeCameraStreamer()
-        else:
-            cameras = CameraStreamer(
-                {"cam_high": args.cam_high_topic, "cam_right_wrist": args.cam_right_wrist_topic}
+        right_can_interface = args.right_can_interface or args.can_interface
+        if config["robot_mode"] == "dual":
+            operator = DualXarmOperator(
+                left_can_interface=args.left_can_interface,
+                right_can_interface=right_can_interface,
+                dry_run=args.dry_run,
+                left_home=config["left0"],
+                right_home=config["right0"],
             )
+        else:
+            operator = XarmOperator(
+                can_interface=right_can_interface,
+                dry_run=args.dry_run,
+                home_position=config["right0"],
+            )
+        if args.dry_run:
+            cameras = FakeCameraStreamer(config["image_keys"])
+        else:
+            cameras = CameraStreamer(_topic_map_from_args(args, config["image_keys"]))
 
         import termios
         import tty

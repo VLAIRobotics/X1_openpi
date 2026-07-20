@@ -21,38 +21,67 @@ DEFAULT_KD = [3.0, 3.0, 3.0, 3.0, 0.2, 0.2, 0.2]
 GRIPPER_KP, GRIPPER_KD = 16.0, 0.3
 HOME_GRIPPER_KP, HOME_GRIPPER_KD = 10.0, 0.5
 
+SINGLE_ARM_DIM = 8
+DUAL_ARM_DIM = 16
+
 HOME_POSITION = np.array([
     -0.14133669435977936, 0.444007009267807, -0.05349050089716911,
     1.600000023841858, 0.012397955171763897, 0.12722209095954895,
     0.0061951628886163235, -1.100000023841858,
 ])
 
-CAMERA_TOPICS = {
+SINGLE_CAMERA_TOPICS = {
     "cam_high": "/cam_chest/cam_chest/color/image_raw",
     "cam_right_wrist": "/cam_wrist_right/cam_wrist_right/color/image_raw",
 }
+DUAL_CAMERA_TOPICS = {
+    "cam_high": "/cam_chest/cam_chest/color/image_raw",
+    "cam_left_wrist": "/cam_wrist_left/cam_wrist_left/color/image_raw",
+    "cam_right_wrist": "/cam_wrist_right/cam_wrist_right/color/image_raw",
+}
+CAMERA_TOPICS = SINGLE_CAMERA_TOPICS
 
 
-def clip_action(action: np.ndarray) -> np.ndarray:
-    """Clip an 8-dim action to joint and gripper limits."""
+def clip_single_arm_action(action: np.ndarray) -> np.ndarray:
+    """Clip an 8-dim single-arm action to joint and gripper limits."""
     action = np.asarray(action, dtype=np.float64).copy()
+    if action.shape != (SINGLE_ARM_DIM,):
+        raise ValueError(f"Expected single-arm action shape ({SINGLE_ARM_DIM},), got {action.shape}")
     action[:7] = np.clip(action[:7], JOINT_LIMITS_LOWER, JOINT_LIMITS_UPPER)
     action[7] = np.clip(action[7], GRIPPER_LOWER, GRIPPER_UPPER)
     return action
 
 
+def clip_action(action: np.ndarray) -> np.ndarray:
+    """Clip a single-arm 8-dim or dual-arm 16-dim action."""
+    action = np.asarray(action, dtype=np.float64)
+    if action.shape == (SINGLE_ARM_DIM,):
+        return clip_single_arm_action(action)
+    if action.shape == (DUAL_ARM_DIM,):
+        return np.concatenate(
+            [
+                clip_single_arm_action(action[:SINGLE_ARM_DIM]),
+                clip_single_arm_action(action[SINGLE_ARM_DIM:]),
+            ]
+        )
+    raise ValueError(f"Expected action shape ({SINGLE_ARM_DIM},) or ({DUAL_ARM_DIM},), got {action.shape}")
+
+
 class _MockArm:
     """Dry-run stand-in for the CAN hardware: positions track commands."""
 
-    def __init__(self):
-        self.positions = HOME_POSITION.copy()
+    def __init__(self, home_position=None):
+        self.positions = np.asarray(home_position if home_position is not None else HOME_POSITION).copy()
 
 
 class XarmOperator:
-    def __init__(self, can_interface: str = "can1", dry_run: bool = False):
+    def __init__(self, can_interface: str = "can1", dry_run: bool = False, home_position=None):
         self.dry_run = dry_run
+        self.home_position = clip_single_arm_action(
+            HOME_POSITION if home_position is None else np.asarray(home_position)
+        )
         if dry_run:
-            self._mock = _MockArm()
+            self._mock = _MockArm(self.home_position)
             return
 
         import xarm_can as oa
@@ -89,7 +118,7 @@ class XarmOperator:
         return np.array(joints + [gripper], dtype=np.float64)
 
     def send_action(self, action, kp=None, kd=None, gripper_kp=GRIPPER_KP, gripper_kd=GRIPPER_KD):
-        action = clip_action(action)
+        action = clip_single_arm_action(action)
         if self.dry_run:
             self._mock.positions = action
             return
@@ -110,7 +139,7 @@ class XarmOperator:
 
     def go_home(self, target=None, nstep: int = 220, step_dt: float = 0.01):
         """Smoothly interpolate from the current position to `target`."""
-        target = clip_action(HOME_POSITION if target is None else np.asarray(target))
+        target = clip_single_arm_action(self.home_position if target is None else np.asarray(target))
         current = self.read_state()
         for step in range(nstep):
             alpha = (step + 1) / nstep
@@ -128,6 +157,58 @@ class XarmOperator:
         print("Disabling motors...")
         self.arm.disable_all()
         self.arm.recv_all()
+
+
+class DualXarmOperator:
+    """Controls two xArm instances as one 16-dim dual-arm robot.
+
+    State/action order follows the X1 dual-arm convention:
+    [left joint1..joint7, left gripper, right joint1..joint7, right gripper].
+    """
+
+    def __init__(
+        self,
+        left_can_interface: str = "can0",
+        right_can_interface: str = "can1",
+        dry_run: bool = False,
+        left_home=None,
+        right_home=None,
+    ):
+        self.left = XarmOperator(left_can_interface, dry_run=dry_run, home_position=left_home)
+        try:
+            self.right = XarmOperator(right_can_interface, dry_run=dry_run, home_position=right_home)
+        except Exception:
+            self.left.shutdown()
+            raise
+
+    def read_state(self) -> np.ndarray:
+        return np.concatenate([self.left.read_state(), self.right.read_state()])
+
+    def send_action(self, action, **kwargs):
+        action = clip_action(action)
+        self.left.send_action(action[:SINGLE_ARM_DIM], **kwargs)
+        self.right.send_action(action[SINGLE_ARM_DIM:], **kwargs)
+
+    def go_home(self, target=None, nstep: int = 220, step_dt: float = 0.01):
+        target = clip_action(
+            np.concatenate([self.left.home_position, self.right.home_position])
+            if target is None
+            else np.asarray(target)
+        )
+        current = self.read_state()
+        for step in range(nstep):
+            alpha = (step + 1) / nstep
+            self.send_action(
+                (1 - alpha) * current + alpha * target,
+                gripper_kp=HOME_GRIPPER_KP,
+                gripper_kd=HOME_GRIPPER_KD,
+            )
+            if step_dt > 0:
+                time.sleep(step_dt)
+
+    def shutdown(self):
+        self.left.shutdown()
+        self.right.shutdown()
 
 
 def _ros_image_to_numpy(msg) -> np.ndarray:
@@ -215,10 +296,13 @@ class CameraStreamer:
 class FakeCameraStreamer:
     """Dry-run camera source returning random images."""
 
+    def __init__(self, image_keys=None):
+        self._image_keys = tuple(image_keys or CAMERA_TOPICS)
+
     def get_images(self, max_age_s: float = 0.5, verbose: bool = True):
         return {
             name: np.random.randint(256, size=(480, 640, 3), dtype=np.uint8)
-            for name in CAMERA_TOPICS
+            for name in self._image_keys
         }
 
     def stop(self):

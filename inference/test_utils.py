@@ -14,7 +14,10 @@ def test_get_config_returns_required_fields():
     config = get_config(_args())
 
     assert config["state_dim"] == 8
+    assert config["robot_mode"] == "single"
     assert len(config["right0"]) == 8
+    assert len(config["home"]) == 8
+    assert config["image_keys"] == ("cam_high", "cam_right_wrist")
     assert config["language_instruction"] == "pick up the object"
     assert config["chunk_size"] == 50
     assert config["episode_len"] == 1000
@@ -26,6 +29,18 @@ def test_get_config_returns_required_fields():
 def test_get_config_unknown_task_raises():
     with pytest.raises(ValueError):
         get_config(_args(task="no_such_task"))
+
+
+def test_get_config_dual_arm_task():
+    config = get_config(_args(task="pi05_x1_fold_towel"))
+
+    assert config["robot_mode"] == "dual"
+    assert config["state_dim"] == 16
+    assert len(config["left0"]) == 8
+    assert len(config["right0"]) == 8
+    assert len(config["home"]) == 16
+    assert config["image_keys"] == ("cam_high", "cam_left_wrist", "cam_right_wrist")
+    assert config["language_instruction"] == "Fold the towel twice"
 
 
 def test_process_action_gripper_rule_below_set(monkeypatch):
@@ -55,3 +70,29 @@ def test_process_action_no_rules_is_identity():
     action = np.arange(8, dtype=np.float64)
     out = process_action("example_task", action)
     np.testing.assert_array_equal(out, action)
+
+
+def test_process_action_dual_gripper_rule_applies_both(monkeypatch):
+    import utils
+
+    monkeypatch.setitem(
+        utils.TASK_CONFIGS,
+        "dual_gripper_rule_task",
+        {
+            "robot_mode": "dual",
+            "language_instruction": "x",
+            "left0": [0.0] * 8,
+            "right0": [0.0] * 8,
+            "action_postprocess": {
+                "gripper": [{"when": "below", "threshold": -0.5, "set": -1.0}]
+            },
+        },
+    )
+    action = np.zeros(16)
+    action[7] = -0.6
+    action[15] = -0.7
+
+    out = process_action("dual_gripper_rule_task", action)
+
+    assert out[7] == -1.0
+    assert out[15] == -1.0

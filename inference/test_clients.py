@@ -13,6 +13,16 @@ def _payload():
     }
 
 
+def _dual_payload():
+    return {
+        "cam_high": np.random.randint(256, size=(480, 640, 3), dtype=np.uint8),
+        "cam_left_wrist": np.random.randint(256, size=(480, 640, 3), dtype=np.uint8),
+        "cam_right_wrist": np.random.randint(256, size=(480, 640, 3), dtype=np.uint8),
+        "state": np.arange(16, dtype=np.float32),
+        "instruction": "stack_green_cube",
+    }
+
+
 def test_build_observation_format():
     obs = build_observation(_payload())
 
@@ -24,6 +34,17 @@ def test_build_observation_format():
         assert img.shape == (3, 224, 224)
         assert img.dtype == np.uint8
     assert obs["prompt"] == "pick up the object"
+
+
+def test_build_observation_dual_arm_format():
+    obs = build_observation(
+        _dual_payload(),
+        state_dim=16,
+        image_keys=("cam_high", "cam_left_wrist", "cam_right_wrist"),
+    )
+
+    assert obs["state"].shape == (16,)
+    assert set(obs["images"].keys()) == {"cam_high", "cam_left_wrist", "cam_right_wrist"}
 
 
 class _FakeWsClient:
@@ -67,3 +88,17 @@ def test_warmup_sends_valid_observation():
     obs = fake.received[0]
     assert obs["state"].shape == (STATE_DIM,)
     assert set(obs["images"].keys()) == {"cam_high", "cam_right_wrist"}
+
+
+def test_warmup_sends_dual_arm_observation():
+    client = OpenpiClient.__new__(OpenpiClient)
+    fake = _FakeWsClient()
+    client.client = fake
+    client.state_dim = 16
+    client.image_keys = ("cam_high", "cam_left_wrist", "cam_right_wrist")
+
+    client.warmup()
+
+    obs = fake.received[0]
+    assert obs["state"].shape == (16,)
+    assert set(obs["images"].keys()) == {"cam_high", "cam_left_wrist", "cam_right_wrist"}

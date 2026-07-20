@@ -26,16 +26,44 @@ def get_config(args):
         raise ValueError(f"Invalid task name: {args.task}")
 
     language_instruction = task_config.get("language_instruction")
-    right0 = task_config.get("right0")
-    if language_instruction is None or right0 is None:
+    if language_instruction is None:
         raise ValueError(f"Task config for {args.task} is missing required fields")
-    if len(right0) != 8:
-        raise ValueError(f"right0 for {args.task} must have 8 dims, got {len(right0)}")
+
+    left0 = task_config.get("left0")
+    right0 = task_config.get("right0")
+    robot_mode = task_config.get("robot_mode", "dual" if left0 is not None else "single")
+
+    if robot_mode == "single":
+        if right0 is None:
+            raise ValueError(f"Task config for {args.task} is missing right0")
+        if len(right0) != 8:
+            raise ValueError(f"right0 for {args.task} must have 8 dims, got {len(right0)}")
+        home = list(right0)
+        state_dim = 8
+        image_keys = tuple(task_config.get("image_keys", ["cam_high", "cam_right_wrist"]))
+    elif robot_mode == "dual":
+        if left0 is None or right0 is None:
+            raise ValueError(f"Dual-arm task config for {args.task} must define left0 and right0")
+        if len(left0) != 8:
+            raise ValueError(f"left0 for {args.task} must have 8 dims, got {len(left0)}")
+        if len(right0) != 8:
+            raise ValueError(f"right0 for {args.task} must have 8 dims, got {len(right0)}")
+        home = list(left0) + list(right0)
+        state_dim = 16
+        image_keys = tuple(
+            task_config.get("image_keys", ["cam_high", "cam_left_wrist", "cam_right_wrist"])
+        )
+    else:
+        raise ValueError(f"Unsupported robot_mode for {args.task}: {robot_mode}")
 
     return {
         "episode_len": args.max_publish_step,
-        "state_dim": 8,
+        "state_dim": state_dim,
+        "robot_mode": robot_mode,
+        "home": home,
+        "left0": left0,
         "right0": right0,
+        "image_keys": image_keys,
         "action_postprocess": task_config.get("action_postprocess", {}),
         "task": args.task,
         "language_instruction": language_instruction,
@@ -68,8 +96,14 @@ def process_action(task, action):
     task_config = TASK_CONFIGS.get(task)
     if task_config is None:
         raise ValueError(f"Invalid task name: {task}")
-    rules = task_config.get("action_postprocess", {}).get("gripper", [])
-    action[7] = _apply_gripper_rules(action[7], rules)
+    action_postprocess = task_config.get("action_postprocess", {})
+    rules = action_postprocess.get("gripper", [])
+    if rules:
+        for index in (7, 15) if action.shape[0] == 16 else (7,):
+            action[index] = _apply_gripper_rules(action[index], rules)
+    if action.shape[0] == 16:
+        for index, key in ((7, "left_gripper"), (15, "right_gripper")):
+            action[index] = _apply_gripper_rules(action[index], action_postprocess.get(key, []))
     return action
 
 
