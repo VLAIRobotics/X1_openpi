@@ -280,7 +280,7 @@ python inference/infer_sync.py \
   --max_publish_step 10 \
   --publish_rate 30 \
   --mit_rate 500 \
-  --camera_wait_s 20 \
+  --camera_wait_s 20
 ```
 
 脚本会初始化 CAN、等待相机帧、回到任务 home 位并执行策略。退出时会回 home 并失能电机。确认关节方向、夹爪方向和动作幅度正常后，再逐步提高 `--max_publish_step`。
