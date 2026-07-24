@@ -1,11 +1,11 @@
 # X1_openpi
 
-面向 X1 xArm 双臂（`x_max_sdk` 硬件栈）的 [OpenPI](https://github.com/Physical-Intelligence/openpi) 训练与真机推理适配。GPU 工作站负责 OpenPI 训练和 websocket 策略服务；机器人主机负责 ROS 2 相机观测、CAN 状态读取和动作下发。
+面向 X1 xArm 双臂（`xarm-python-control` 硬件控制栈）的 [OpenPI](https://github.com/Physical-Intelligence/openpi) 训练与真机推理适配。GPU 工作站负责 OpenPI 训练和 websocket 策略服务；机器人主机负责 ROS 2 相机观测、CAN 状态读取和动作下发。
 
 ```text
-x_max_sdk 采集 LeRobot 双臂数据集 → OpenPI 微调（GPU 工作站）→ 策略服务 :8000
-                                                                     ↓ websocket
-            ROS 2 相机 + 双 CAN 机器人主机 → infer_sync.py → X1 双臂
+xArm 采集 LeRobot 双臂数据集 → OpenPI 微调（GPU 工作站）→ 策略服务 :8000
+                                                                  ↓ websocket
+            ROS 2 相机 + xarm-python-control 双 CAN 机器人主机 → infer_sync.py → X1 双臂
 ```
 
 > 安全提示：本工程通过 CAN 直接控制真实机械臂。首次使用新 checkpoint 时，急停必须可触及；先完成 dry-run，再以低步数、低发布频率进行真机测试。
@@ -30,7 +30,7 @@ x_max_sdk 采集 LeRobot 双臂数据集 → OpenPI 微调（GPU 工作站）→
 - 图像：`cam_high` 对应胸部相机；`cam_left_wrist` 对应左腕相机；`cam_right_wrist` 对应右腕相机。
 - state/action：16 维，顺序为 `[left_joint1, ..., left_joint7, left_gripper, right_joint1, ..., right_joint7, right_gripper]`；单位均为弧度，动作是绝对位置。
 - 夹爪范围：`-1.1` 约为全开，`0.0` 为闭合。
-- 客户端会将图像 resize/pad 至 `224×224`、转换为 `CHW uint8`；服务端返回 50 步 action chunk，客户端默认以 30 Hz 执行、500 Hz MIT 插值下发。
+- 客户端会将图像 resize/pad 至 `224×224`、转换为 `CHW uint8`；服务端返回 50 步 action chunk，客户端默认以 30 Hz 执行。关节限位、重力补偿和轨迹插值由 `xarm-python-control` 的 `Arm.move_joints()` 处理。
 - 注意：本工程的 X1 双臂推理是 16 维 xArm schema，不是官方 ALOHA 默认的 14 维 schema；GPU 端训练配置和机器人端 task 必须一致。
 
 示例任务位于 [`inference/task_configs.yaml`](inference/task_configs.yaml)：
@@ -53,7 +53,7 @@ pi05_x1_fold_towel:
 
 ## 2. 机器人主机环境
 
-本节只在机器人主机执行。GPU 工作站不需要 `xarm_can` 或 ROS 2 环境。
+本节只在机器人主机执行。GPU 工作站不需要 `xarm-python-control`、CAN 或 ROS 2 环境。
 
 ### 2.1 创建 xarm 环境
 
@@ -72,25 +72,25 @@ pip install -e .
 conda install -c conda-forge openssl=3.2 libcurl -y
 ```
 
-### 2.2 注册 x_max SDK 的 `xarm_can`
+### 2.2 准备 `xarm-python-control`
 
-将 x_max_sdk 发布包放在 `~/x_max_sdk`。它提供与设备平台匹配的 `xarm_can` 扩展；扩展的 Python ABI 必须与当前 Python 3.10 一致。
+部署端通过 `/home/lft-vlai2/Documents/csy/xarm-python-control` 中的 `Arm` 类控制机械臂。若控制库放在其它位置，运行推理前设置 `XARM_PYTHON_CONTROL_DIR`。
 
 ```bash
-mkdir -p "$CONDA_PREFIX/etc/conda/activate.d"
-cat > "$CONDA_PREFIX/etc/conda/activate.d/x_max_sdk.sh" <<'EOF'
-export PYTHONPATH="$HOME/x_max_sdk/publish/lerobot_collector${PYTHONPATH:+:$PYTHONPATH}"
-EOF
+git clone <xarm-python-control-repo> /home/lft-vlai2/Documents/csy/xarm-python-control
 
-conda deactivate
 conda activate xarm
+conda install -c conda-forge pinocchio -y
+pip install python-can mujoco scipy mink
+
 source /opt/ros/humble/setup.bash
-python -c "import xarm_can, rclpy; print('xarm_can:', xarm_can.__file__)"
+PYTHONPATH=/home/lft-vlai2/Documents/csy/xarm-python-control \
+  python -c "from arm_control import Arm; import rclpy; print('arm_control ok')"
 ```
 
 ### 2.3 创建并安装 X1_openpi 环境
 
-从已验证的 `xarm` 环境克隆独立环境，避免影响 x_max_sdk 的数据采集/部署环境：
+从已验证的 `xarm` 环境克隆独立环境，避免影响数据采集环境：
 
 ```bash
 conda create -n X1_openpi --clone xarm
@@ -279,20 +279,22 @@ python inference/infer_sync.py \
   --max_episodes 10 \
   --max_publish_step 10 \
   --publish_rate 30 \
-  --mit_rate 500 \
   --camera_wait_s 20
 ```
 
-脚本会初始化 CAN、等待相机帧、回到任务 home 位并执行策略。退出时会回 home 并失能电机。确认关节方向、夹爪方向和动作幅度正常后，再逐步提高 `--max_publish_step`。
+脚本会初始化 CAN、等待相机帧、通过 `Arm.move_joints()` 回到任务 home 位并执行策略。`--publish_rate` 控制策略动作步频；每个 action 会以 `1 / publish_rate` 作为 `Arm.move_joints()` 的运动时长。退出时会回 home 并失能电机。确认关节方向、夹爪方向和动作幅度正常后，再逐步提高 `--max_publish_step`。
 
 ## 5. 常见问题
 
-### `No module named xarm_can`
+### `Failed to import xarm-python-control` 或 `No module named pinocchio`
 
-重新激活 `X1_openpi` 环境，并检查 x_max SDK 激活脚本与扩展路径：
+重新激活 `X1_openpi` 环境，并检查控制库路径与依赖：
 
 ```bash
 conda activate X1_openpi
-echo "$PYTHONPATH"
-python -c "import xarm_can; print(xarm_can.__file__)"
+export XARM_PYTHON_CONTROL_DIR=/home/lft-vlai2/Documents/csy/xarm-python-control
+conda install -c conda-forge pinocchio -y
+pip install python-can mujoco scipy mink
+PYTHONPATH="$XARM_PYTHON_CONTROL_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+  python -c "from arm_control import Arm; print('arm_control ok')"
 ```
