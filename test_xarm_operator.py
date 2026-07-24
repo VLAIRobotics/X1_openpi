@@ -1,5 +1,8 @@
+import time
+
 import numpy as np
 
+import xarm_operator
 from xarm_operator import (
     DUAL_CAMERA_TOPICS,
     DualXarmOperator,
@@ -32,6 +35,60 @@ def test_dual_dry_run_send_then_read_roundtrip():
     op.send_action(target)
 
     np.testing.assert_allclose(op.read_state(), target)
+
+
+def test_dual_send_action_dispatches_arms_concurrently():
+    op = DualXarmOperator(dry_run=True)
+    action = np.zeros(16)
+    calls = []
+
+    def make_send(name):
+        def send_action(single_action, duration=None):
+            calls.append((name, "start", time.perf_counter()))
+            time.sleep(0.05)
+            calls.append((name, "end", time.perf_counter()))
+
+        return send_action
+
+    op.left.send_action = make_send("left")
+    op.right.send_action = make_send("right")
+
+    start = time.perf_counter()
+    op.send_action(action, duration=1.0 / 30.0)
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < 0.09
+    starts = {name: ts for name, event, ts in calls if event == "start"}
+    ends = {name: ts for name, event, ts in calls if event == "end"}
+    assert starts["left"] < ends["right"]
+    assert starts["right"] < ends["left"]
+
+
+def test_send_action_updates_gripper_without_step_period_sleep(monkeypatch):
+    class FakeArm:
+        def __init__(self, can_interface, use_gravity=True, arm_prefix="xarm_right_"):
+            self.joint_calls = []
+            self.gripper_calls = []
+
+        def read_q8(self, recv_timeout=0.002):
+            return np.zeros(8)
+
+        def move_joints(self, q7, duration=1.0):
+            self.joint_calls.append((np.asarray(q7), duration))
+
+        def move_gripper(self, target_q, duration=1.0, n_steps=100):
+            self.gripper_calls.append((target_q, duration, n_steps))
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(xarm_operator, "_load_arm_control", lambda: (FakeArm, 600))
+    op = XarmOperator(dry_run=False)
+
+    op.send_action(np.arange(8, dtype=np.float64), duration=1.0 / 30.0)
+
+    assert op.arm.joint_calls[0][1] == 1.0 / 30.0
+    assert op.arm.gripper_calls == [(7.0, 0.0, 1)]
 
 
 def test_dry_run_send_records_action_directly():

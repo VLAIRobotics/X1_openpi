@@ -110,7 +110,7 @@ class XarmOperator:
 
         duration = 1.0 / self._control_hz if duration is None else duration
         self.arm.move_joints(action[:7], duration=duration)
-        self.arm.move_gripper(float(action[7]), duration=duration, n_steps=1)
+        self.arm.move_gripper(float(action[7]), duration=0.0, n_steps=1)
 
     def go_home(self, target=None, nstep: int = 220, step_dt: float = 0.01):
         """Move to `target` using the Arm control class."""
@@ -168,8 +168,22 @@ class DualXarmOperator:
 
     def send_action(self, action, duration: float | None = None):
         action = _as_dual_arm_action(action)
-        self.left.send_action(action[:SINGLE_ARM_DIM], duration=duration)
-        self.right.send_action(action[SINGLE_ARM_DIM:], duration=duration)
+        errors = []
+
+        def send(operator, single_action):
+            try:
+                operator.send_action(single_action, duration=duration)
+            except Exception as exc:
+                errors.append(exc)
+
+        left_thread = threading.Thread(target=send, args=(self.left, action[:SINGLE_ARM_DIM]))
+        right_thread = threading.Thread(target=send, args=(self.right, action[SINGLE_ARM_DIM:]))
+        left_thread.start()
+        right_thread.start()
+        left_thread.join()
+        right_thread.join()
+        if errors:
+            raise errors[0]
 
     def go_home(self, target=None, nstep: int = 220, step_dt: float = 0.01):
         target = _as_dual_arm_action(
