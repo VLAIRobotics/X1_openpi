@@ -111,7 +111,6 @@ def model_inference(args, config, operator, cameras, policy=None):
     else:
         action_filter = ActionFilter(config["action_filter_alpha"])
 
-    sub_steps = max(1, round(args.mit_rate / args.publish_rate))
     step_period = 1.0 / args.publish_rate
     episodes_done = 0
     moved_home = False
@@ -142,7 +141,6 @@ def model_inference(args, config, operator, cameras, policy=None):
             chunk_transition_steps = config["chunk_transition_steps"]
             transition_counter = chunk_transition_steps
             prev_action = None
-            prev_published = None
             episode_closed = False
 
             while t < config["episode_len"] and not shutdown_event.is_set():
@@ -190,15 +188,10 @@ def model_inference(args, config, operator, cameras, policy=None):
                 filt_hist.append(action.copy())
                 prev_action = action.copy()
 
-                start = prev_published if prev_published is not None else action
-                for s in range(sub_steps):
-                    alpha = (s + 1) / sub_steps
-                    operator.send_action((1 - alpha) * start + alpha * action)
-                    target_time = step_start + (s + 1) * step_period / sub_steps
-                    sleep_s = target_time - time.perf_counter()
-                    if sleep_s > 0:
-                        time.sleep(sleep_s)
-                prev_published = action.copy()
+                operator.send_action(action, duration=step_period)
+                sleep_s = step_start + step_period - time.perf_counter()
+                if sleep_s > 0:
+                    time.sleep(sleep_s)
 
                 t += 1
                 print("Published Step", t)
@@ -223,7 +216,6 @@ def build_arg_parser():
     parser.add_argument("--max_publish_step", type=int, default=10000, help="Max steps per episode")
     parser.add_argument("--chunk_size", type=int, default=50, help="Action chunk size")
     parser.add_argument("--publish_rate", type=int, default=30, help="Action step rate (Hz)")
-    parser.add_argument("--mit_rate", type=int, default=500, help="MIT command rate (Hz)")
     parser.add_argument("--can_interface", type=str, default="can1", help="CAN interface name")
     parser.add_argument("--left_can_interface", type=str, default="can0", help="Left arm CAN interface")
     parser.add_argument(

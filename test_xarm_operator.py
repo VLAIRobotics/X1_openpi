@@ -6,37 +6,7 @@ from xarm_operator import (
     HOME_POSITION,
     FakeCameraStreamer,
     XarmOperator,
-    clip_action,
 )
-
-
-def test_clip_action_bounds():
-    action = np.array([-5.0, 5.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.5])
-    out = clip_action(action)
-
-    assert out[0] == -1.3   # joint1 lower
-    assert out[1] == 1.7    # joint2 upper
-    assert out[3] == 1.0    # 未越界不变
-    assert out[7] == 0.0    # gripper upper
-
-
-def test_clip_action_gripper_lower():
-    action = np.zeros(8)
-    action[7] = -2.0
-    assert clip_action(action)[7] == -1.1
-
-
-def test_clip_action_dual_arm_bounds():
-    action = np.zeros(16)
-    action[0] = -99.0
-    action[8] = 99.0
-    action[15] = 99.0
-
-    out = clip_action(action)
-
-    assert out[0] == -1.3
-    assert out[8] == 3.4
-    assert out[15] == 0.0
 
 
 def test_dry_run_send_then_read_roundtrip():
@@ -54,7 +24,7 @@ def test_dual_dry_run_send_then_read_roundtrip():
     op = DualXarmOperator(dry_run=True)
     target = np.concatenate(
         [
-            np.array([0.1, 0.2, 0.3, 0.4, 0.1, 0.1, 0.1, -0.5]),
+            np.array([0.1, 0.1, 0.3, 0.4, 0.1, 0.1, 0.1, -0.5]),
             np.array([0.2, 0.3, 0.4, 0.5, 0.2, 0.2, 0.2, -0.4]),
         ]
     )
@@ -64,14 +34,25 @@ def test_dual_dry_run_send_then_read_roundtrip():
     np.testing.assert_allclose(op.read_state(), target)
 
 
-def test_dry_run_send_clips_before_apply():
+def test_dry_run_send_records_action_directly():
     op = XarmOperator(dry_run=True)
     action = np.zeros(8)
     action[0] = -99.0
 
     op.send_action(action)
 
-    assert op.read_state()[0] == -1.3
+    assert op.read_state()[0] == -99.0
+
+
+def test_send_action_rejects_wrong_shape():
+    op = XarmOperator(dry_run=True)
+
+    try:
+        op.send_action(np.zeros(7))
+    except ValueError as exc:
+        assert "Expected single-arm action shape" in str(exc)
+    else:
+        raise AssertionError("Expected wrong-shape action to raise ValueError")
 
 
 def test_go_home_dry_run_reaches_target():
@@ -81,6 +62,17 @@ def test_go_home_dry_run_reaches_target():
     op.go_home(nstep=5, step_dt=0.0)
 
     np.testing.assert_allclose(op.read_state(), HOME_POSITION, atol=1e-9)
+
+
+def test_dual_go_home_dry_run_reaches_target():
+    left_home = np.array([0.1, 0.1, 0.0, 0.4, 0.0, 0.0, 0.0, -0.8])
+    right_home = np.array([-0.1, 0.4, 0.0, 0.5, 0.0, 0.0, 0.0, -0.7])
+    op = DualXarmOperator(dry_run=True, left_home=left_home, right_home=right_home)
+    op.send_action(np.concatenate([left_home + 0.05, right_home + 0.05]))
+
+    op.go_home(nstep=5, step_dt=0.0)
+
+    np.testing.assert_allclose(op.read_state(), np.concatenate([left_home, right_home]), atol=1e-9)
 
 
 def test_fake_camera_streamer_returns_images():

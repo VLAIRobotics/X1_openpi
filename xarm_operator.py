@@ -1,25 +1,20 @@
-"""xarm hardware layer: direct CAN control (xarm_can) + ROS2 camera streaming.
+"""xarm hardware layer: xarm-python-control Arm class + ROS2 camera streaming.
 
-`xarm_can` and `rclpy` are imported lazily so the dry-run path (and unit
-tests) work without hardware or a ROS2 environment.
+The hardware control class and `rclpy` are imported lazily so the dry-run path
+and unit tests work without hardware or a ROS2 environment.
 """
 
+import os
+from pathlib import Path
+import sys
 import threading
 import time
 
 import numpy as np
 
-# 关节限位 (rad)，来自 x_air URDF
-JOINT_LIMITS_LOWER = np.array([-1.3, -0.1, -1.5, 0.0, -1.5, -0.7, -1.5])
-JOINT_LIMITS_UPPER = np.array([3.4, 1.7, 1.5, 2.4, 1.5, 0.7, 1.5])
-# 夹爪限位 (rad)：-1.1 全开，0.0 闭合；与 LeRobot 数据集最后一维对齐
-GRIPPER_LOWER, GRIPPER_UPPER = -1.1, 0.0
-
-# MIT 控制增益（x_air xarm_deploy_direct.py 现值）
-DEFAULT_KP = [240.0, 240.0, 240.0, 240.0, 24.0, 31.0, 25.0]
-DEFAULT_KD = [3.0, 3.0, 3.0, 3.0, 0.2, 0.2, 0.2]
-GRIPPER_KP, GRIPPER_KD = 16.0, 0.3
-HOME_GRIPPER_KP, HOME_GRIPPER_KD = 10.0, 0.5
+# xarm-python-control is kept outside this repo. Override with
+# XARM_PYTHON_CONTROL_DIR if the checkout moves.
+DEFAULT_XARM_CONTROL_DIR = Path("/home/lft-vlai2/Documents/csy/xarm-python-control")
 
 SINGLE_ARM_DIM = 8
 DUAL_ARM_DIM = 16
@@ -42,121 +37,98 @@ DUAL_CAMERA_TOPICS = {
 CAMERA_TOPICS = SINGLE_CAMERA_TOPICS
 
 
-def clip_single_arm_action(action: np.ndarray) -> np.ndarray:
-    """Clip an 8-dim single-arm action to joint and gripper limits."""
+def _load_arm_control():
+    control_dir = Path(os.environ.get("XARM_PYTHON_CONTROL_DIR", DEFAULT_XARM_CONTROL_DIR)).expanduser()
+    if not control_dir.exists():
+        raise FileNotFoundError(
+            f"xarm-python-control not found at {control_dir}; set XARM_PYTHON_CONTROL_DIR"
+        )
+    control_dir_str = str(control_dir)
+    if control_dir_str not in sys.path:
+        sys.path.insert(0, control_dir_str)
+
+    try:
+        from arm_control import Arm, CONTROL_HZ
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "Failed to import xarm-python-control. Make sure its dependencies "
+            "(python-can, pinocchio, mujoco, scipy, mink) are installed in the "
+            f"active Python environment. Source: {control_dir}"
+        ) from exc
+
+    return Arm, CONTROL_HZ
+
+
+def _as_single_arm_action(action: np.ndarray) -> np.ndarray:
     action = np.asarray(action, dtype=np.float64).copy()
     if action.shape != (SINGLE_ARM_DIM,):
         raise ValueError(f"Expected single-arm action shape ({SINGLE_ARM_DIM},), got {action.shape}")
-    action[:7] = np.clip(action[:7], JOINT_LIMITS_LOWER, JOINT_LIMITS_UPPER)
-    action[7] = np.clip(action[7], GRIPPER_LOWER, GRIPPER_UPPER)
     return action
 
 
-def clip_action(action: np.ndarray) -> np.ndarray:
-    """Clip a single-arm 8-dim or dual-arm 16-dim action."""
-    action = np.asarray(action, dtype=np.float64)
-    if action.shape == (SINGLE_ARM_DIM,):
-        return clip_single_arm_action(action)
-    if action.shape == (DUAL_ARM_DIM,):
-        return np.concatenate(
-            [
-                clip_single_arm_action(action[:SINGLE_ARM_DIM]),
-                clip_single_arm_action(action[SINGLE_ARM_DIM:]),
-            ]
-        )
-    raise ValueError(f"Expected action shape ({SINGLE_ARM_DIM},) or ({DUAL_ARM_DIM},), got {action.shape}")
-
-
-class _MockArm:
-    """Dry-run stand-in for the CAN hardware: positions track commands."""
-
-    def __init__(self, home_position=None):
-        self.positions = np.asarray(home_position if home_position is not None else HOME_POSITION).copy()
+def _as_dual_arm_action(action: np.ndarray) -> np.ndarray:
+    action = np.asarray(action, dtype=np.float64).copy()
+    if action.shape != (DUAL_ARM_DIM,):
+        raise ValueError(f"Expected dual-arm action shape ({DUAL_ARM_DIM},), got {action.shape}")
+    return action
 
 
 class XarmOperator:
-    def __init__(self, can_interface: str = "can1", dry_run: bool = False, home_position=None):
+    def __init__(
+        self,
+        can_interface: str = "can1",
+        dry_run: bool = False,
+        home_position=None,
+        arm_prefix: str = "xarm_right_",
+        use_gravity: bool = True,
+    ):
+        self.can_interface = can_interface
         self.dry_run = dry_run
-        self.home_position = clip_single_arm_action(
-            HOME_POSITION if home_position is None else np.asarray(home_position)
-        )
+        raw_home = HOME_POSITION if home_position is None else np.asarray(home_position)
         if dry_run:
-            self._mock = _MockArm(self.home_position)
+            self.home_position = _as_single_arm_action(raw_home)
+            self._positions = self.home_position.copy()
             return
 
-        import xarm_can as oa
-
-        self._oa = oa
-        self.arm = oa.XArm(can_interface, True)  # True = CAN-FD
-        motor_types = [
-            oa.MotorType.DM8009, oa.MotorType.DM8009,
-            oa.MotorType.DM4340, oa.MotorType.DM4340,
-            oa.MotorType.DM4310, oa.MotorType.DM4310, oa.MotorType.DM4310,
-        ]
-        send_ids = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]
-        recv_ids = [0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17]
-        self.arm.init_arm_motors(motor_types, send_ids, recv_ids)
-        self.arm.init_gripper_motor(oa.MotorType.DM4310, 0x08, 0x18)
-        self.arm.set_callback_mode_all(oa.CallbackMode.STATE)
-        self.arm.enable_all()
-        time.sleep(0.1)
-        self.arm.recv_all()
-        self.arm.refresh_all()
-        self.arm.recv_all()
-        n_motors = len(self.arm.get_arm().get_motors())
-        print(f"CAN hardware initialized on {can_interface}: {n_motors} arm motors")
+        self.home_position = _as_single_arm_action(raw_home)
+        Arm, control_hz = _load_arm_control()
+        self._control_hz = control_hz
+        self.arm = Arm(can_interface, use_gravity=use_gravity, arm_prefix=arm_prefix)
+        print(f"xarm-python-control Arm initialized on {can_interface}, prefix={arm_prefix}")
 
     def read_state(self) -> np.ndarray:
         if self.dry_run:
-            return self._mock.positions.copy()
+            return self._positions.copy()
 
-        self.arm.refresh_all()
-        self.arm.recv_all()
-        joints = [m.get_position() for m in self.arm.get_arm().get_motors()]
-        grippers = self.arm.get_gripper().get_motors()
-        gripper = grippers[0].get_position() if grippers else 0.0
-        return np.array(joints + [gripper], dtype=np.float64)
+        return self.arm.read_q8(recv_timeout=0.002)
 
-    def send_action(self, action, kp=None, kd=None, gripper_kp=GRIPPER_KP, gripper_kd=GRIPPER_KD):
-        action = clip_single_arm_action(action)
+    def send_action(self, action, duration: float | None = None):
+        action = _as_single_arm_action(action)
         if self.dry_run:
-            self._mock.positions = action
+            self._positions = action
             return
 
-        kp = kp if kp is not None else DEFAULT_KP
-        kd = kd if kd is not None else DEFAULT_KD
-        oa = self._oa
-        arm_params = [
-            oa.MITParam(kp[i], kd[i], float(action[i]), 0.0, 0.0) for i in range(7)
-        ]
-        self.arm.get_arm().mit_control_all(arm_params)
-        self.arm.get_gripper().mit_control_all(
-            [oa.MITParam(gripper_kp, gripper_kd, float(action[7]), 0.0, 0.0)]
-        )
-        # 等待 CAN 总线处理后接收反馈（参考 x_air 遥操作脚本）
-        time.sleep(0.0002)
-        self.arm.recv_all()
+        duration = 1.0 / self._control_hz if duration is None else duration
+        self.arm.move_joints(action[:7], duration=duration)
+        self.arm.move_gripper(float(action[7]), duration=duration, n_steps=1)
 
     def go_home(self, target=None, nstep: int = 220, step_dt: float = 0.01):
-        """Smoothly interpolate from the current position to `target`."""
-        target = clip_single_arm_action(self.home_position if target is None else np.asarray(target))
-        current = self.read_state()
-        for step in range(nstep):
-            alpha = (step + 1) / nstep
-            self.send_action(
-                (1 - alpha) * current + alpha * target,
-                gripper_kp=HOME_GRIPPER_KP,
-                gripper_kd=HOME_GRIPPER_KD,
-            )
-            if step_dt > 0:
-                time.sleep(step_dt)
+        """Move to `target` using the Arm control class."""
+        target = self.home_position if target is None else np.asarray(target)
+        target = _as_single_arm_action(target)
+        if not self.dry_run:
+            duration = max(nstep * step_dt, 1.0 / self._control_hz)
+            self.arm.move_joints(target[:7], duration=duration)
+            self.arm.move_gripper(float(target[7]), duration=min(max(duration, 0.2), 1.0))
+            return
+
+        self.send_action(target)
 
     def shutdown(self):
         if self.dry_run:
             return
-        print("Disabling motors...")
-        self.arm.disable_all()
-        self.arm.recv_all()
+        print("Closing xarm-python-control Arm...")
+        self.arm.close()
 
 
 class DualXarmOperator:
@@ -174,9 +146,19 @@ class DualXarmOperator:
         left_home=None,
         right_home=None,
     ):
-        self.left = XarmOperator(left_can_interface, dry_run=dry_run, home_position=left_home)
+        self.left = XarmOperator(
+            left_can_interface,
+            dry_run=dry_run,
+            home_position=left_home,
+            arm_prefix="xarm_left_",
+        )
         try:
-            self.right = XarmOperator(right_can_interface, dry_run=dry_run, home_position=right_home)
+            self.right = XarmOperator(
+                right_can_interface,
+                dry_run=dry_run,
+                home_position=right_home,
+                arm_prefix="xarm_right_",
+            )
         except Exception:
             self.left.shutdown()
             raise
@@ -184,27 +166,37 @@ class DualXarmOperator:
     def read_state(self) -> np.ndarray:
         return np.concatenate([self.left.read_state(), self.right.read_state()])
 
-    def send_action(self, action, **kwargs):
-        action = clip_action(action)
-        self.left.send_action(action[:SINGLE_ARM_DIM], **kwargs)
-        self.right.send_action(action[SINGLE_ARM_DIM:], **kwargs)
+    def send_action(self, action, duration: float | None = None):
+        action = _as_dual_arm_action(action)
+        self.left.send_action(action[:SINGLE_ARM_DIM], duration=duration)
+        self.right.send_action(action[SINGLE_ARM_DIM:], duration=duration)
 
     def go_home(self, target=None, nstep: int = 220, step_dt: float = 0.01):
-        target = clip_action(
+        target = _as_dual_arm_action(
             np.concatenate([self.left.home_position, self.right.home_position])
             if target is None
-            else np.asarray(target)
+            else target
         )
-        current = self.read_state()
-        for step in range(nstep):
-            alpha = (step + 1) / nstep
-            self.send_action(
-                (1 - alpha) * current + alpha * target,
-                gripper_kp=HOME_GRIPPER_KP,
-                gripper_kd=HOME_GRIPPER_KD,
-            )
-            if step_dt > 0:
-                time.sleep(step_dt)
+        if not self.left.dry_run and not self.right.dry_run:
+            errors = []
+
+            def move(operator, single_target):
+                try:
+                    operator.go_home(single_target, nstep=nstep, step_dt=step_dt)
+                except Exception as exc:
+                    errors.append(exc)
+
+            left_thread = threading.Thread(target=move, args=(self.left, target[:SINGLE_ARM_DIM]))
+            right_thread = threading.Thread(target=move, args=(self.right, target[SINGLE_ARM_DIM:]))
+            left_thread.start()
+            right_thread.start()
+            left_thread.join()
+            right_thread.join()
+            if errors:
+                raise errors[0]
+            return
+
+        self.send_action(target)
 
     def shutdown(self):
         self.left.shutdown()

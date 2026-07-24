@@ -33,7 +33,6 @@ def _args():
         max_publish_step=4,
         chunk_size=2,
         publish_rate=100,
-        mit_rate=200,
         host="127.0.0.1",
         port=8000,
         max_episodes=1,
